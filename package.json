@@ -1,0 +1,33 @@
+{
+  "name": "simulationServer",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "promptForType": "node server",
+    "start": "nodemon server"
+  },
+  "dependencies": {
+    "babel-core": "^6.26.3",
+    "babel-preset-es2015-node4": "^2.1.0",
+    "babel-register": "^6.14.0",
+    "body-parser": "^1.15.2",
+    "ccxt": "^1.13.50",
+    "client-sessions": "^0.7.0",
+    "cors": "^2.7.1",
+    "express": "^4.16.3",
+    "jshint": "^2.9.5",
+    "multer": "^1.1.0",
+    "node-binance-api": "^0.5.0",
+    "prompt": "^1.0.0",
+    "socket.io": "^2.1.0",
+    "standard": "^11.0.1"
+  },
+  "devDependencies": {
+    "eslint": "^4.19.1",
+    "eslint-config-standard": "^11.0.0",
+    "eslint-plugin-import": "^2.12.0",
+    "eslint-plugin-node": "^6.0.1",
+    "eslint-plugin-promise": "^3.7.0",
+    "eslint-plugin-standard": "^3.1.0"
+  }
+}
