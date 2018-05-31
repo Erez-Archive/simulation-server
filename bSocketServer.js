@@ -1,120 +1,21 @@
 const app = require('express');
 const http = require('http').Server(app);
-
 // Local client connection
 const io = require('socket.io')(http);
 
+// ----------------------------------- Trade consts
+const CONSTS = require('./bConsts');
+const initialETH = 0.012;
+let activeTradeTimer = null;
+
 // ----------------------------------- binance
+const possibleTradeRoutes = require('./bTradeRoutes');
 const marketData = {};
 const marketsMinimums = {};
 let lastUpdated = null;
-let isTradeAllowed = true;
-let isErrorStop = false;
-let isBackoffStop = false;
+let isTradeAllowed = false;
+let isRunning = false;
 let isPerformingArbitrage = false;
-const possibleTradeRoutes = [
-  [
-    {
-      order: 'buy',
-      symbol: 'BCN/ETH'
-    }, {
-      order: 'sell',
-      symbol: 'BCN/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'BNB/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'BNB/ETH',
-    }, {
-      order: 'buy',
-      symbol: 'BCN/BNB',
-    }, {
-      order: 'sell',
-      symbol: 'BCN/ETH',
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'STORM/ETH'
-    }, {
-      order: 'sell',
-      symbol: 'STORM/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'BNB/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'BNB/ETH'
-    }, {
-      order: 'buy',
-      symbol: 'STORM/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'STORM/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'ZIL/ETH'
-    }, {
-      order: 'sell',
-      symbol: 'ZIL/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'BNB/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'BNB/ETH'
-    }, {
-      order: 'buy',
-      symbol: 'ZIL/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'ZIL/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'LTC/ETH'
-    }, {
-      order: 'sell',
-      symbol: 'LTC/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'BNB/ETH'
-    }
-  ],
-  [
-    {
-      order: 'buy',
-      symbol: 'BNB/ETH'
-    }, {
-      order: 'buy',
-      symbol: 'LTC/BNB'
-    }, {
-      order: 'sell',
-      symbol: 'LTC/ETH'
-    }
-  ]
-]
-
-const FEE_PERCENT = 0.001;
-const MIN_ARBITRAGE_TO_TRADE = 0.004;
-const TRADE_COOLDOWN_DURATION_MILISECS = 10000;
-const initialETH = 0.012;
 
 const binance = require('node-binance-api');
 global.binance = binance;
@@ -137,7 +38,7 @@ const connectToBinance = activeSocket => {
 
 const disconnectFromBinance = () => {
   console.log('Disconnecting!');
-}
+};
 
 // ----------------------------
 
@@ -169,23 +70,38 @@ io.on('connection', socket => {
         socket.emit('single trade response', {res, err})
       });
     }
-  })
+  });
 
-  socket.on('arbitrage test', () => {
+  socket.on('arbitrage test', async() => {
     console.log('---------------------------RUNNING TEST-----------------');
-    possibleTradeRoutes.forEach(orders => {
-      const workOrders = orders.map(order => getPairData(order));
-      const currOrdersArbitrage = getArbitrage(workOrders, initialETH);
-      if (currOrdersArbitrage === -1) return; // Found none;
-      console.log('RESULT:', currOrdersArbitrage);
-      const resLength = currOrdersArbitrage.length;
-      const calculatedRes = currOrdersArbitrage[resLength - 1].quantity / initialETH - 1;
-      if (calculatedRes > MIN_ARBITRAGE_TO_TRADE) {
-        console.log('Found AN ARBITRAGE OF:', (calculatedRes * 100).toFixed(2), '%');
-        const ordersToExecute = createExecutionOrders(currOrdersArbitrage);
-        if (!isPerformingArbitrage) makeArbitrageTrade(ordersToExecute, socket);
-      } else console.log('CALC RESULT:', (calculatedRes * 100).toFixed(2), '%');
-    });
+    isRunning = true;
+    isTradeAllowed = true;
+    clearTimeout(activeTradeTimer);
+    activeTradeTimer = setTimeout(() => {
+      console.log('-------------------TEST OVER------------');
+      isRunning = false;
+    }, CONSTS.TEST_DURATION);
+    while (isRunning) {
+      possibleTradeRoutes.forEach(async orders => {
+        const workOrders = orders.map(order => getPairData(order));
+        const currOrdersArbitrage = getArbitrage(workOrders, initialETH);
+        if (currOrdersArbitrage === -1) return; // Found none;
+        console.log('RESULT:', currOrdersArbitrage);
+        const resLength = currOrdersArbitrage.length;
+        const calculatedRes = currOrdersArbitrage[resLength - 1].quantity / initialETH - 1;
+        if (calculatedRes > CONSTS.MIN_ARBITRAGE_TO_TRADE) {
+          console.log('Found AN ARBITRAGE OF:', (calculatedRes * 100).toFixed(2), '%');
+          const ordersToExecute = createExecutionOrders(currOrdersArbitrage);
+          if (!isPerformingArbitrage) {
+            makeArbitrageTrade(ordersToExecute, socket);
+            console.log('-------------------COOLING DOWN-------------------');
+            await coolDown(CONSTS.TRADE_COOLDOWN_DURATION_MILISECS);
+            console.log('------------DONE COOLING DOWN------------------');
+          }
+        } else console.log('CALC RESULT:', (calculatedRes * 100).toFixed(2), '%');
+      });
+      await coolDown(5000);
+    }
   });
 
   socket.on('disconnect', socket => {
@@ -249,13 +165,13 @@ function getFormattedPair(symbol, seperatorIdx) {
 }
 
 function getArbitrage(orders, initialAmount) {
-  console.log('Checking arbitrage for order:', orders);
+  // console.log('Checking arbitrage for order:', orders);
   if (!orders.every(order => order.hasData)) return -1;
   let quantity = initialAmount;
   return orders.map(order => {
     const preExecutionQuantity = quantity;
     quantity = order.order === 'buy' ? quantity / order.currRate : quantity * order.currRate;
-    return {...order, preExecutionQuantity, preFeeQuantity: quantity, quantity: quantity * (1 - FEE_PERCENT)};
+    return {...order, preExecutionQuantity, preFeeQuantity: quantity, quantity: quantity * (1 - CONSTS.FEE_PERCENT)};
   });
 }
 
@@ -263,8 +179,8 @@ function createExecutionOrders(analyzedArbitrageData) {
   return analyzedArbitrageData.map(order => {
     const seperatorIdx = order.symbol.indexOf('/');
     const precisionMultiplier = Math.pow(10, order.quantityPrecision);
-    if (order.order === 'buy') return {pair: getFormattedPair(order.symbol, seperatorIdx), order: 'buy', quantity: Math.floor(order.preFeeQuantity * precisionMultiplier) / precisionMultiplier};
-    else                       return {pair: getFormattedPair(order.symbol, seperatorIdx), order: 'sell', quantity: Math.floor(order.preExecutionQuantity * precisionMultiplier) / precisionMultiplier};
+    if (order.order === 'buy') return {unformattedPair: order.symbol, pair: getFormattedPair(order.symbol, seperatorIdx), order: 'buy', quantity: Math.floor(order.preFeeQuantity * precisionMultiplier) / precisionMultiplier};
+    else                       return {unformattedPair: order.symbol, pair: getFormattedPair(order.symbol, seperatorIdx), order: 'sell', quantity: Math.floor(order.preExecutionQuantity * precisionMultiplier) / precisionMultiplier};
   });
 };
 
@@ -276,21 +192,31 @@ function makeArbitrageTrade(orders, clientSocket) {
   const orderType = order0.order === 'buy' ? 'marketBuy' : 'marketSell';
   if (isTradeOn) binance[orderType](order0.pair, order0.quantity, (err, res) => {
     clientSocket.emit('single trade response', {res, err});
-    if (err || res.statusCode >= 300) return;
-    const order1 = orders[1];
+    if (err || res.statusCode > 200) {
+      isTradeAllowed = false;
+      return;
+    }
+    const order1 = fixRoundingErrors(orders[0], orders[1], res);
     const orderType = order1.order === 'buy' ? 'marketBuy' : 'marketSell';
     if (isTradeOn) binance[orderType](order1.pair, order1.quantity, (err, res) => {
       clientSocket.emit('single trade response', {res, err});
-      if (err || res.statusCode >= 300) return;
-      const order2 = orders[2];
+      if (err || res.statusCode > 200) {
+        isTradeAllowed = false;
+        return;
+      }
+      const order2 = fixRoundingErrors(orders[1], orders[2], res);
       const orderType = order2.order === 'buy' ? 'marketBuy' : 'marketSell';    
       if (isTradeOn) binance[orderType](order2.pair, order2.quantity, (err, res) => {
         clientSocket.emit('single trade response', {res, err});
-        isTradeAllowed = false;
+        if (err || res.statusCode > 200) {
+          isTradeAllowed = false;
+          return;
+        }
+        // isTradeAllowed = false;
         isPerformingArbitrage = false;
-        setTimeout(() => {
-          isTradeAllowed = true;
-        }, 5000);
+        // setTimeout(() => {
+        //   isTradeAllowed = true;
+        // }, 5000);
       });
     });
   });
@@ -298,8 +224,21 @@ function makeArbitrageTrade(orders, clientSocket) {
   console.log('-------------------------------------------------');
 }
 
+function fixRoundingErrors(executedOrder, nextOrder, actualRes) {
+  if (executedOrder.order === 'buy' && nextOrder.order === 'sell' && nextOrder.quantity > actualRes.executedQty) {
+    const currPrecision = getNumOfDecimals(nextOrder.quantity);
+    const precisionMultiplier = Math.pow(10, currPrecision);
+    nextOrder.oldQuantity = nextOrder.quantity;
+    nextOrder.quantity = Math.floor(actualRes.executedQty * precisionMultiplier) / precisionMultiplier;
+  }
+  // console.log('EXECUTED:', executedOrder);
+  // console.log('NEXT:', nextOrder);
+  // console.log('ACTUAL:', actualRes);
+  return nextOrder;
+}
+
 function isTradeOn() {
-  return isTradeAllowed && !isErrorStop && !isBackoffStop;
+  return isTradeAllowed && (Date.now() - lastUpdated < CONSTS.NOW_TO_LAST_UPDATED_MAX_DIFF);
 }
 
 function getPrecision(num) {
@@ -311,7 +250,8 @@ function getPrecision(num) {
   return count;
 }
 
-function toFixed(amount, numOfDecimals) {
-  var re = new RegExp('^-?\\d+(?:\.\\d{0,' + (numOfDecimals || -1) + '})?');
-  return amount.toString().match(re)[0];
+function getNumOfDecimals(num) {
+  return (num + "").split(".")[1].length;
 }
+
+const coolDown = miliseconds => new Promise((resolve, reject) => setTimeout(resolve, miliseconds));
