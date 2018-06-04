@@ -2,9 +2,10 @@ const app = require('express');
 const http = require('http').Server(app);
 // Local client connection
 const io = require('socket.io')(http);
-
+const crypto = require('crypto');
 // ----------------------------------- Trade consts
 const CONSTS = require('./bConsts');
+const overhead = require('./bOverheadData');
 const initialETH = 0.012;
 let activeTradeTimer = null;
 
@@ -20,6 +21,7 @@ let isPerformingArbitrage = false;
 const binance = require('node-binance-api');
 global.binance = binance;
 binance.options({
+  APIKEY: overhead.APIKEY, APISECRET: overhead.APISECRET, useServerTime: true, // If you get timestamp errors, synchronize to server time at startup
   test: false // If you want to use sandbox mode where orders are simulated
 });
 
@@ -43,6 +45,13 @@ const disconnectFromBinance = () => {
 // ----------------------------
 
 let clientsCount = 0;
+
+// ----------------------------------- server code
+const tradeUtils = require('./bTradeUtils');
+const clientPort = 3000;
+http.listen(clientPort, () => {
+  console.log('Listening on port', clientPort);
+});
 
 io.on('connection', socket => {
   console.log('Client is connected');
@@ -95,12 +104,12 @@ io.on('connection', socket => {
           if (!isPerformingArbitrage) {
             makeArbitrageTrade(ordersToExecute, socket);
             console.log('-------------------COOLING DOWN-------------------');
-            await coolDown(CONSTS.TRADE_COOLDOWN_DURATION_MILISECS);
+            await tradeUtils.coolDown(CONSTS.TRADE_COOLDOWN_DURATION_MILISECS);
             console.log('------------DONE COOLING DOWN------------------');
           }
         } else console.log('CALC RESULT:', (calculatedRes * 100).toFixed(2), '%');
       });
-      await coolDown(5000);
+      await tradeUtils.coolDown(5000);
     }
   });
 
@@ -114,16 +123,11 @@ io.on('connection', socket => {
   })
 })
 
-const clientPort = 3000;
-http.listen(clientPort, () => {
-  console.log('Listening on port', clientPort);
-});
-
 function getPairData(order) {
   const seperatorIdx = order.symbol.indexOf('/');
   if (seperatorIdx === -1) return {...order, hasData: false};
   const pair = getFormattedPair(order.symbol, seperatorIdx);
-  if (marketData[pair]) return {...order, currRate: marketData[pair].currRate, minOrderQuantity: marketsMinimums[pair].minQty, quantityPrecision: getPrecision(marketsMinimums[pair].minQty), time: marketData[pair].time, hasData: true};
+  if (marketData[pair]) return {...order, currRate: marketData[pair].currRate, minOrderQuantity: marketsMinimums[pair].minQty, quantityPrecision: tradeUtils.getPrecision(marketsMinimums[pair].minQty), time: marketData[pair].time, hasData: true};
 
   return {...order, hasData: false};
 }
@@ -226,7 +230,7 @@ function makeArbitrageTrade(orders, clientSocket) {
 
 function fixRoundingErrors(executedOrder, nextOrder, actualRes) {
   if (executedOrder.order === 'buy' && nextOrder.order === 'sell' && nextOrder.quantity > actualRes.executedQty) {
-    const currPrecision = getNumOfDecimals(nextOrder.quantity);
+    const currPrecision = tradeUtils.getNumOfDecimals(nextOrder.quantity);
     const precisionMultiplier = Math.pow(10, currPrecision);
     nextOrder.oldQuantity = nextOrder.quantity;
     nextOrder.quantity = Math.floor(actualRes.executedQty * precisionMultiplier) / precisionMultiplier;
@@ -240,18 +244,3 @@ function fixRoundingErrors(executedOrder, nextOrder, actualRes) {
 function isTradeOn() {
   return isTradeAllowed && (Date.now() - lastUpdated < CONSTS.NOW_TO_LAST_UPDATED_MAX_DIFF);
 }
-
-function getPrecision(num) {
-  let count = 0;
-  while (num < 1) {
-    num = num * 10;
-    count++;
-  }
-  return count;
-}
-
-function getNumOfDecimals(num) {
-  return (num + "").split(".")[1].length;
-}
-
-const coolDown = miliseconds => new Promise((resolve, reject) => setTimeout(resolve, miliseconds));
